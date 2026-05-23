@@ -1,0 +1,106 @@
+---
+title: "verifyAction Orchestration"
+description: "Required ordering, return-type semantics, and DenyReason enum for the authority check."
+---
+
+# 5. `verifyAction` Orchestration (NORMATIVE)
+
+## 5.1 Signature, return type, `DenyReason` enum
+
+A conformant AuthResolverImpl **MUST** expose `verifyAction` with the following signature:
+
+```solidity
+function verifyAction(bytes32 node,
+ string calldata credentialId,
+ bytes calldata message,
+ bytes calldata signature) external view returns (VerificationResult memory);
+
+struct VerificationResult {
+ bool allowed;
+ DenyReason reason;
+ uint64 resolvedAt; // block.timestamp at resolution
+ bytes32 stateHash; // hash binding the result to the inputs that informed it
+}
+
+enum DenyReason {
+ None, // allowed = true; reason is None
+ Unverified, // signature did not verify, or credential record missing/empty
+ Stale, // current block.timestamp outside credential's notBefore/notAfter window
+ Revoked, // revocation record present and non-empty for the credential id
+ Mismatch, // schemeId in credential record not supported by the Verifier
+ PolicyDenied, // reserved — capability scope policy check failed (deferred to v1.1)
+ EndpointUnproven // reserved — endpoint-binding check failed (deferred to v1.1)
+}
+```
+
+`stateHash` **MUST** be deterministic over the inputs that informed the decision. The reference computation is:
+
+```
+stateHash = keccak256(abi.encode(node,
+ credentialId,
+ keccak256(message),
+ keccak256(signature),
+ credentialRecordBytes, // raw CBOR bytes returned by data(node, "auth.credential[<id>]")
+ revocationRecordBytes, // raw CBOR bytes returned by data(node, "auth.revocation[<id>]")
+ block.number))
+```
+
+Relying parties MAY use `stateHash` as a replay-binding nonce for the application-layer message; the AuthResolverImpl does NOT enforce replay protection at this layer.
+
+## 5.2 Required behavior (NORMATIVE ordering)
+
+A conformant implementation **MUST** execute the following checks in order. On the first check that fails, it MUST return immediately with `allowed = false` and the corresponding `DenyReason`; it MUST NOT continue evaluating subsequent checks.
+
+1. **Credential lookup.** Read `auth.credential[<credentialId>]` via the inherited `data(node, key)`. If the returned bytes are empty, return `{allowed: false, reason: Unverified}`.
+2. **Decode.** Decode the CBOR bytes into a `CredentialRecord` ([§6.1](/spec/record-schemas#61-credentialrecord)). Decoding failure MUST return `{allowed: false, reason: Unverified}`.
+3. **Validity window.** If `block.timestamp < notBefore` OR (`notAfter != 0` AND `block.timestamp > notAfter`), return `{allowed: false, reason: Stale}`. A `notAfter` of `0` means "no expiry."
+4. **Revocation check.** Read `auth.revocation[<credentialId>]`. If the returned bytes are non-empty, return `{allowed: false, reason: Revoked}`. (Decoding the revocation record's reason/timestamp fields is OPTIONAL for the deny decision; the presence of any bytes is sufficient.)
+5. **Scheme support.** Call `IVerifier(verifier).isSchemeSupported(credentialRecord.schemeId)`. If false, return `{allowed: false, reason: Mismatch}`.
+6. **Signature verification.** Call `IVerifier(verifier).verify(credentialRecord.schemeId, message, signature, credentialRecord.pubKey)`. If false, return `{allowed: false, reason: Unverified}`.
+7. **Success.** Return `{allowed: true, reason: None, resolvedAt: uint64(block.timestamp), stateHash: <per §5.1>}`.
+
+Capability-scope policy enforcement (step that would set `reason: PolicyDenied`) and endpoint-binding checks (`reason: EndpointUnproven`) are reserved in the enum but **MUST NOT** be performed in v1. Implementations that perform additional checks beyond steps 1–7 are non-conformant for this revision.
+
+## 5.3 Caveats and lifecycle rules (NORMATIVE for relying parties)
+
+**Direct invocation, not UR-routed.** `verifyAction` is a custom convenience method, not a standard ENS resolver profile. Universal Resolver V2 does not route `verifyAction` calls — a UR-routed call attempting `verifyAction` would surface as `UnsupportedResolverProfile(selector)` (the typed UR error catalogued in [§4.4](/spec/authresolver#44-eip-165--ierc7996-advertisement-normative)). Relying parties **MUST** first resolve `name → resolver address` via `UniversalResolverV2.findResolver(name)` and then call `verifyAction` directly on the resolver contract address. Equivalently, callers MAY use `resolveWithResolver(resolver, name, data, gateways)` which bypasses `findResolver` but still runs through UR's CCIP-Read infrastructure.
+
+**SDK normalization.** Any SDK or CLI tooling that constructs a namehash from a user-typed ENS name **MUST** normalize the input via ENSIP-15 (`@adraffy/ens-normalize` or the equivalent in the host library) before hashing — this is the universal ENS normalization correctness rule (ENSIP-15). AuthResolverImpl itself receives an already-resolved `bytes32 node` and does not normalize; the obligation is on the caller's side.
+
+**Name lifecycle and credential lifecycle.** AuthResolver records are keyed by namehash (`keccak256(node, partHash(key))` per [§4.5.3](/spec/authresolver#453-resource-keying)), which is invariant across registrations of the same name. v2 provides **two complementary clearing mechanisms** on ownership change:
+
+1. **Fresh-proxy deployment (registry-side).** New owner deploys a fresh AuthResolver proxy via VerifiableFactory. Per [§4.3](/spec/authresolver#43-deployment-model-normative), the proxy address depends on `msg.sender` at deploy time, so a new owner (or a new deployer) yields a different CREATE2 address. New owner passes the fresh proxy as the resolver parameter to `register`, or replaces the subregistry wholesale. Universal Resolver V2 now routes the name to the new proxy. The **old proxy still holds its old records onchain** — clearing is an artifact of the registry no longer pointing to it, not a state change on the old proxy.
+
+2. **`clearRecords(node)` (resolver-side, single tx).** `PermissionedResolver.sol:136,250-255` exposes `clearRecords(bytes32 node)` which bumps an internal per-node version counter `_versions[node]` and orphans all prior records for that node in a single transaction. This is the right mechanism when the *same* AuthResolver proxy is retained across an ownership change (e.g., transferring control of an existing setup) and the new owner wants a clean slate without redeploying. `clearRecords` is gated by `ROLE_SET_DATA` (same as `setData`).
+
+Both mechanisms exist; an implementer chooses based on whether the AuthResolver proxy itself is being replaced (mechanism 1) or retained (mechanism 2).
+
+Relying parties **MUST NOT** cache resolver addresses across sessions. They **MUST** re-resolve via Universal Resolver V2 on every authentication check. Caching the proxy address from a previous session bypasses mechanism 1's registry-side protection and admits the stale-credential threat. Per-record stale-state detection requires reading `recordVersions(node)` (the version counter mechanism 2 bumps) and rejecting cached record values that don't carry the current version.
+
+For names re-registered to a new owner who deliberately reuses the previous owner's resolver address as the `resolver` parameter to `register` (rare; requires intent + knowledge of the old address) and does NOT call `clearRecords`, the old credentials remain live until explicitly cleared. The relying-party caching rule above is the primary mitigation; an optional `verifyContract(proxy, expectedImplementation)` provenance check (see [§4.3](/spec/authresolver#43-deployment-model-normative)) is the belt-and-suspenders mitigation.
+
+**Aliasing.** If the AuthResolver name has been aliased to another name via `setAlias` (inherited from PermissionedResolver), the alias rewrite happens only inside UR's `resolve` path. Direct calls to `verifyAction` using the aliased name's namehash return the *unaliased* records. Callers using `verifyAction` directly on an aliased name **MUST** pre-resolve the alias via UR before calling, or accept that the unaliased records are what they see. Full alias semantics for multi-name MARPs are deferred to v1.1.
+
+**ENSIP-25 binding (identity layer).** AuthResolverImpl assumes — but does not enforce — that the ENS name has a valid ENSIP-25 binding to an ERC-8004 identity. Relying parties that need atomic binding+authentication verification **SHOULD** compose the two reads themselves (e.g., via `IMulticallable`) in a single batched call. Adding ENSIP-25 enforcement inside `verifyAction` is deferred to v1.1 pending NCCoE position-paper discussion.
+
+**ENSIP-26 attribution (attribution layer).** AuthResolverImpl assumes — but does not enforce — that ENSIP-26 agent-context records (`services[name]`, agent description, endpoints) may exist under the same ENS name in a parallel namespace. Relying parties needing endpoint-binding context (e.g., "did this signed action come from a service endpoint the agent actually published?") **SHOULD** compose `verifyAction(node, credentialId, msg, sig)` with `text(node, "services[X]")` reads in a single batched `IMulticallable` call. The `DenyReason.EndpointUnproven` value (§5.1) is reserved for future versions where AuthResolverImpl might enforce this binding inside `verifyAction`; v1 implementations MUST NOT return `EndpointUnproven` (per §5.2 and §5.4 row F6). Active enforcement of the attribution-layer composition is deferred to v1.1.
+
+## 5.4 Conformance criteria (NORMATIVE)
+
+A conformant `verifyAction` implementation (on the AuthResolverImpl side) and a conformant relying-party integration satisfy the requirements in this table. The implementation-side rows are MUST/MUST NOT for the AuthResolverImpl; the relying-party-side rows are MUST/MUST NOT/SHOULD for SDKs and integrators consuming the spec.
+
+| # | Requirement | Type | Source | Applies to |
+|---|---|---|---|---|
+| F1 | Expose `verifyAction(bytes32 node, string credentialId, bytes message, bytes signature) external view returns (VerificationResult memory)` | MUST | §5.1 | AuthResolverImpl |
+| F2 | Return `VerificationResult { bool allowed; DenyReason reason; uint64 resolvedAt; bytes32 stateHash; }` | MUST | §5.1 | AuthResolverImpl |
+| F3 | Compute `stateHash` deterministically over the inputs that informed the decision (reference computation per §5.1) | MUST | §5.1 | AuthResolverImpl |
+| F4 | Execute the §5.2 7-step ordering: credential lookup → CBOR decode → validity window → revocation check → scheme support → signature verification → success | MUST | §5.2 | AuthResolverImpl |
+| F5 | On first failed step, return immediately with `allowed = false` and the corresponding `DenyReason`; NOT continue evaluating subsequent steps | MUST | §5.2 | AuthResolverImpl |
+| F6 | NOT perform additional checks beyond steps 1–7 (capability-scope `PolicyDenied` and endpoint-binding `EndpointUnproven` are reserved for v1.1) | MUST NOT | §5.2 | AuthResolverImpl |
+| F7 | First resolve `name → resolver address` via `UniversalResolverV2.findResolver(name)`, then call `verifyAction` directly on the resolver contract address | MUST | §5.3 | Relying party |
+| F8 | Normalize user-typed ENS names via ENSIP-15 (`@adraffy/ens-normalize`) before constructing namehash | MUST | §5.3 | SDK / CLI tooling |
+| F9 | NOT cache resolver addresses across sessions | MUST NOT | §5.3 | Relying party |
+| F10 | Re-resolve via Universal Resolver V2 on every authentication check | MUST | §5.3 | Relying party |
+| F11 | On aliased names: pre-resolve the alias via UR before calling `verifyAction` directly (or accept that unaliased records are returned) | MUST | §5.3 | Relying party |
+| F12 | When atomic binding+authentication verification is required: compose ENSIP-25 binding read and `verifyAction` in a single batched call (e.g., via `IMulticallable`) | SHOULD | §5.3 | Relying party |
+| F13 | When implementation integrity matters: verify the proxy's impl slot against a known-audited registry on every critical `verifyAction` call | SHOULD | [§8](/spec/security) | Relying party |

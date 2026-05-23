@@ -1,0 +1,18 @@
+---
+title: "Security Considerations"
+description: "Verifier handler trust, per-instance upgrade authority, name re-registration, HCA attribution, replay."
+---
+
+# 8. Security Considerations
+
+This section is intentionally narrow in this revision. Full threat-model treatment (replay, key-compromise, gateway-trust, governance-capture) is deferred to a later v1.0-draft revision in parallel with the signed-freshness specification.
+
+**Verifier scheme-handler trust.** The EIP-1271 path executes a staticcall to a caller-supplied contract address. Per [§3.2](/spec/verifier#32-registered-signature-schemes-v1) and [§3.5](/spec/verifier#35-security-considerations), the Verifier MUST gas-cap the staticcall and treat any revert as `valid = false`. The Verifier's correctness depends on the EIP-7951 precompile being live and correct on the target chain.
+
+**Per-instance upgrade authority.** Per [§4.7](/spec/authresolver#47-upgrade-authority-normative), each AuthResolver proxy is independently upgradeable by its owner. A compromised name owner key can upgrade their proxy to a malicious implementation at the same address. Relying parties that care about implementation integrity SHOULD verify the proxy's implementation slot against a known-audited registry on every critical `verifyAction` call. This revision does not mandate this; the optional implementation-version registry is the deferred mechanism.
+
+**Name re-registration.** Per [§5.3](/spec/verify-action#53-caveats-and-lifecycle-rules-normative-for-relying-parties), relying parties MUST NOT cache resolver addresses across sessions. v2's per-name resolver model auto-clears stale records on ownership change *only if* relying parties re-resolve via Universal Resolver on each check. The narrow attack scenarios (deliberate attacker reusing old resolver, misconfigured registration tool defaulting to "preserve previous resolver") are addressed by the relying-party caching rule plus the optional `verifyContract(proxy, expectedImplementation)` provenance SDK call.
+
+**HCA attribution misconfiguration.** Per [§4.6](/spec/authresolver#46-hca-attribution-normative), granting `ROLE_SET_DATA` to a smart-account proxy address rather than the controlling EOA results in the role check failing silently for smart-account-backed MARPs operating under HCA. This is a deployment-time correctness concern, not a runtime threat — but Wave-1 MARP integration guides MUST cover it explicitly. See also [§4.5.2](/spec/authresolver#452-admin-role-layer-normative) for the admin-role layer governing role delegation, which is a separate misconfiguration vector (granting `ROLE_SET_DATA` without `ROLE_SET_DATA_ADMIN` means the grantee can publish records but cannot delegate further).
+
+**No replay protection at the Verifier layer.** Per [§3.5](/spec/verifier#35-security-considerations), replay binding is the caller's responsibility. The `stateHash` field of `VerificationResult` ([§5.1](/spec/verify-action#51-signature-return-type-denyreason-enum)) provides a deterministic binding that callers can use as a replay nonce, but the AuthResolverImpl does not enforce nonce uniqueness or message freshness beyond the credential's validity window.

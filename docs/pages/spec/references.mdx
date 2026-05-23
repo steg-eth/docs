@@ -1,0 +1,33 @@
+---
+title: "References"
+description: "Normative + informative references for the spec."
+---
+
+# 10. References
+
+## 10.1 Normative references
+
+Conformance with this spec depends on these documents. Implementers MUST consult them for the contracts the spec inherits, the role-keyword semantics, and the encoding/standard formats the spec uses.
+
+- **RFC 2119** — Key words for use in RFCs to Indicate Requirement Levels. Governs the MUST/SHOULD/MAY interpretation in [§1.2](/spec/#12-normative-conventions) and throughout [§3](/spec/verifier)-[§5](/spec/verify-action).
+- **RFC 8949** — Concise Binary Object Representation (CBOR). The encoding for `auth.credential[<id>]`, `auth.capability[<id>]`, and `auth.revocation[<id>]` records ([§4.5](/spec/authresolver#45-record-profile-and-eac-role-grants-normative)).
+- **EIP-165** — Standard Interface Detection. Underlies `supportsInterface(bytes4)` used at [§4.4](/spec/authresolver#44-eip-165--ierc7996-advertisement-normative) for custom auth profile selector advertisement.
+- **EIP-1271** — Standard Signature Validation Method for Contracts. The third v1 Verifier scheme ([§3.2](/spec/verifier#32-registered-signature-schemes-v1) row 3); magic value `0x1626ba7e`.
+- **EIP-1967** — Standard Proxy Storage Slots. The implementation slot used by UUPS proxies deployed via VerifiableFactory ([§2](/spec/#2-composite-of-standards) row 4).
+- **EIP-3668** — CCIP-Read (`OffchainLookup` revert protocol). Reserved for the deferred `getFreshSignedState` path ([§6.4](/spec/record-schemas#64-deferred-getfreshsignedstate)); the basic `data` reads do NOT revert with `OffchainLookup`.
+- **EIP-7951** — P-256 verify precompile. The verification primitive for the WebAuthn-ES256 Verifier scheme ([§3.2](/spec/verifier#32-registered-signature-schemes-v1) row 1).
+- **ENSIP-10** — Wildcard Resolution. Referenced but NOT used in v1 (single-name model; deferred per [§9](/spec/deferred)).
+- **ENSIP-22** / **ERC-7996** — Resolver Capability Discovery (`IERC7996.supportsFeature(bytes4)`). The single-call detection signal for AuthResolver capability ([§4.4](/spec/authresolver#44-eip-165--ierc7996-advertisement-normative)).
+- **ENSIP-23** — Universal Resolver V2 error vocabulary (`ResolverNotFound`, `UnsupportedResolverProfile(bytes4)`, etc.) flowing through to AuthResolver callers ([§4.4](/spec/authresolver#44-eip-165--ierc7996-advertisement-normative), [§5.3](/spec/verify-action#53-caveats-and-lifecycle-rules-normative-for-relying-parties)).
+- **ENSIP-25** — Verifiable agent identity binding (ENS name ↔ ERC-8004 record). Identity-layer precondition for AuthResolverImpl use, not enforced by AuthResolverImpl ([§5.3](/spec/verify-action#53-caveats-and-lifecycle-rules-normative-for-relying-parties)).
+- **ENSIP-26** — Agent-context records (services, endpoints, attribution). Attribution-layer composition alongside AuthResolverImpl; relying parties compose `verifyAction` + `text(node, "services[X]")` reads themselves. Not enforced by AuthResolverImpl ([§5.3](/spec/verify-action#53-caveats-and-lifecycle-rules-normative-for-relying-parties)).
+- **ENSIP-64** — Typed text records. Reserved for human-readable metadata sibling namespaces (e.g., `auth.credential.label[<id>]`); not used for credential bytes ([§4.5](/spec/authresolver#45-record-profile-and-eac-role-grants-normative)).
+- **ERC-8004** — Agent identity registry. Referenced via ENSIP-25 binding; AuthResolverImpl does not call the registry directly ([§2](/spec/#2-composite-of-standards) row 7).
+
+## 10.2 Informative references
+
+Background and source-material pointers. Implementers do not need to read these to achieve conformance, but they explain the design context and identify the canonical Solidity source the spec's normative claims are derived from.
+
+- **ENSv2 contracts source** — `github.com/ensdomains/contracts-v2` — canonical Solidity for PermissionedResolver, EnhancedAccessControl, HCAContextUpgradeable, HCAEquivalence, UniversalResolverV2.
+- **VerifiableFactory source** — `github.com/ensdomains/verifiable-factory` — canonical Solidity for the UUPS proxy factory used at [§4.3](/spec/authresolver#43-deployment-model-normative).
+- **ENS Resolver Capability Discovery** — `docs.ens.domains` ENSIP-22 page and the `IERC7996` reference for the feature-id pattern at [§4.4](/spec/authresolver#44-eip-165--ierc7996-advertisement-normative).

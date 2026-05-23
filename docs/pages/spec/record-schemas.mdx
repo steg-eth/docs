@@ -1,0 +1,81 @@
+---
+title: "Record Schemas"
+description: "CredentialRecord, CapabilityRecord, RevocationRecord, and the deferred getFreshSignedState path."
+---
+
+# 6. Record Schemas (non-normative shape; CBOR field layouts deferred)
+
+The structs below describe the **conceptual shape** of each record. The CBOR field-level layout (map keys, type tags, ordering) is deferred to a later v1.0-draft revision. A conformant implementation MUST encode/decode these records in CBOR; the specific field encoding is not yet pinned by this revision.
+
+## 6.1 `CredentialRecord`
+
+```solidity
+struct CredentialRecord {
+ bytes32 schemeId; // §3.2 — keccak256("WebAuthn-ES256") | keccak256("ECDSA-secp256k1") | keccak256("EIP-1271")
+ bytes pubKey; // Scheme-specific public key bytes (see §3.2 per-scheme encodings)
+ uint64 notBefore; // Validity window start (unix seconds)
+ uint64 notAfter; // Validity window end (unix seconds); 0 means no expiry
+ bytes32 capabilityRef; // Optional pointer to a capability record id (zero = no capability binding in v1)
+}
+```
+
+For v1, `capabilityRef` is structural only — `verifyAction` MUST NOT enforce capability-scope checks (per [§5.2](/spec/verify-action#52-required-behavior-normative-ordering) step 7 note).
+
+## 6.2 `CapabilityRecord`
+
+```solidity
+struct CapabilityRecord {
+ string scope; // Free string scope identifier (per §9 deferral; structured enumeration in v1.1)
+ uint64 expiry; // Capability expiry (unix seconds); 0 means no expiry
+ bytes32 revocationKey; // Lookup key for revocation override (zero = use credential id as revocation key)
+}
+```
+
+Capability records are publishable in v1 but are not consumed by `verifyAction` in v1. They are reserved for the v1.1 policy-enforcement layer.
+
+## 6.3 `RevocationRecord`
+
+```solidity
+struct RevocationRecord {
+ uint64 revokedAt; // Block timestamp at revocation (unix seconds); 0 if not revoked
+ string reason; // Free string reason metadata (optional, may be empty)
+}
+```
+
+Per [§5.2](/spec/verify-action#52-required-behavior-normative-ordering) step 4, the presence of any bytes at `auth.revocation[<id>]` is sufficient for the deny decision; decoding the `revokedAt` and `reason` fields is OPTIONAL for v1 conformance but RECOMMENDED for diagnostic surfaces.
+
+## 6.4 Deferred `getFreshSignedState`
+
+A conformant AuthResolverImpl **MUST** declare the method signature:
+
+```solidity
+function getFreshSignedState(bytes32 node, string calldata recordKey)
+ external view returns (bytes memory signedState);
+```
+
+The method body — including the `OffchainLookup` revert format, gateway URL conventions, the EIP-712 `AuthorityState` typed-data layout, and attestor-key relationship — is **deferred to a later v1.0-draft revision**. Implementations of this revision MAY implement the method as a revert with a documented `NotYetSpecified` custom error.
+
+This signature reservation is included now so that the EIP-165 advertisement ([§4.4](/spec/authresolver#44-eip-165--ierc7996-advertisement-normative)) covers the selector and so the subsequent spec change is body-only (no interface migration).
+
+**Forward-looking note for the deferred body.** When the method body is spec'd, it MUST conform to ENSIP-22's CCIP-Read resolver requirements (per ENS documentation at "ENSIP-22 / supportsFeature"):
+- The resolver MUST support **recursive CCIP-Read calls** (the gateway response may itself trigger another `OffchainLookup`).
+- The gateway MUST serve **CORS headers** so that browser-based relying parties can read freshness responses without proxying.
+- The EIP-712 `AuthorityState` typed message MUST include enough context (resolver address, chain id, block number) for a relying party to verify the attestor signature was issued for *this* AuthResolver instance, not a sibling.
+
+## 6.5 Reference implementation pointer (org confirmed; repo + impl pending)
+
+The reference implementation will live in a **new dedicated repo under the `steg-eth` GitHub organization** (`github.com/steg-eth/<repo-name>`). Repo name within the `steg-eth` org is TBD.
+
+The impl is **not yet written**. Delivery is targeted as an M1 deliverable (target date 2026-08-31), conditional on SPP funding.
+
+The pointer block below will be filled in when the impl lands:
+
+```
+Reference implementation: github.com/steg-eth/<repo-name> (repo name TBD within steg-eth org)
+Tag / commit range covering v1.0-draft.02 scope: <tag-or-sha-range> (not yet delivered)
+Audit status: unaudited (impl not yet written)
+```
+
+**Conformance promise (post-pointer).** The reference implementation will satisfy the conformance criteria specified at [§3.6](/spec/verifier#36-conformance-criteria-normative), [§4.8](/spec/authresolver#48-conformance-criteria-normative), and [§5.4](/spec/verify-action#54-conformance-criteria-normative), and will be the canonical artifact M1 deliverable.
+
+This is a v1.0-final blocker per [§9](/spec/deferred); v1.0-draft.02 ships with the org confirmed and the repo + impl pending.

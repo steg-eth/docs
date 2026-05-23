@@ -1,0 +1,243 @@
+---
+title: "AuthResolverImpl"
+description: "Per-name UUPS proxy holding credential/capability/revocation records on top of PermissionedResolver."
+---
+
+# 4. AuthResolverImpl
+
+## 4.1 Purpose
+
+AuthResolverImpl is the **verification orchestration layer** that composes ENSv2 storage and permission primitives into an Authority-tier surface for MARPs. It holds **credential**, **capability**, and **revocation** records under any ENS name and exposes `verifyAction` ([§5](/spec/verify-action)) as the convenience entry point that bundles credential lookup + scheme dispatch + revocation check.
+
+AuthResolverImpl does **NOT** introduce new primitives for write delegation, scoped binary storage, or ownership-change cleanup. v2's PermissionedResolver substrate ships those natively. AuthResolverImpl's contribution is the orchestration surface plus the credential / capability / revocation record schemas.
+
+## 4.2 Inheritance (NORMATIVE)
+
+A conformant AuthResolverImpl **MUST** extend `PermissionedResolver` directly. The exact `is` clause at `PermissionedResolver.sol:94-113` declares 17 bases, grouped here by role:
+
+```
+AuthResolverImpl (per-name UUPS proxy instance — see §4.3)
+ └── PermissionedResolver
+ ├── IPermissionedResolver (self-interface — defines errors/events)
+ ├── HCAContextUpgradeable (smart-account attribution — see §4.6)
+ ├── UUPSUpgradeable (per-instance ROLE_UPGRADE — see §4.7)
+ ├── EnhancedAccessControl (resource-keyed bitmap roles — see §4.5)
+ ├── IERC7996 (EIP-165 / supportsFeature — see §4.4)
+ ├── IMulticallable (batched reads for relying-party UX)
+ ├── IProxyAuthorization (VerifiableFactory upgrade hook — see §4.7)
+ └── 11 record-profile interfaces:
+ IABIResolver, IAddrResolver, IAddressResolver, IContentHashResolver,
+ IDataResolver, IHasAddressResolver, IInterfaceResolver, INameResolver,
+ IPubkeyResolver, ITextResolver, IVersionableResolver
+```
+
+The AuthResolverImpl **MUST NOT** re-implement primitives already present on PermissionedResolver. It **MUST** add only:
+
+1. The custom auth profile methods ([§5](/spec/verify-action)).
+2. The EIP-165 feature id advertisement (§4.4).
+3. The optional `getDeployedFor` view (§4.3).
+
+PermissionedResolver itself is **not declared `abstract`** — its setters (`setData`, `setAlias`, `setText`, etc.) are `external` and non-virtual (`PermissionedResolver.sol:94`). A subclass like AuthResolverImpl can ADD methods but **cannot override** inherited setter signatures or modifiers without contract-level changes upstream. The spec's "extend" framing holds for additions only.
+
+Resolver-level aliasing (`setAlias`, gated by `ROLE_SET_ALIAS = 1 << 28` root-only — `PermissionedResolverLib.sol:42`) is inherited from PermissionedResolver. AuthResolverImpl **MUST NOT** override or disable it. Full alias semantics for multi-name MARPs are deferred to v1.1.
+
+## 4.3 Deployment model (NORMATIVE)
+
+AuthResolverImpl is **not** a single shared contract. Per `VerifiableFactory.sol`, the v2 pattern is one implementation contract + N per-name UUPS proxies.
+
+A conformant deployment:
+
+- **MUST** deploy `AuthResolverImpl` once per chain as the shared implementation.
+- **MUST** deploy each per-name AuthResolver as a UUPS proxy via the canonical factory:
+ ```solidity
+ function deployProxy(address implementation, uint256 salt, bytes memory data)
+ external returns (address proxy);
+ ```
+ (Source: `VerifiableFactory.sol:32` + `IVerifiableFactory.sol:7`.)
+- **MUST** pass the application-level salt as a `uint256` value derived from `keccak256(abi.encode("AuthResolverV1", ownerAddress, versionId))`, cast to `uint256`, where `ownerAddress` is the name owner that will hold `ROLE_UPGRADE` on the proxy and `versionId` is a `uint256` bumped per Verifier-major release.
+- **SHOULD** expose `getDeployedFor external view returns (address owner, uint256 versionId, address verifier)` returning the immutable values baked into the proxy's init data. This is the only way a relying party can verify resolver-to-owner binding without an external registry lookup.
+
+**`verifyContract` provenance check (NORMATIVE for relying parties that want to verify proxy provenance).** The canonical signature is **two arguments**:
+
+```solidity
+function verifyContract(address proxy, address expectedImplementation)
+ external view returns (bool);
+```
+
+(Source: `VerifiableFactory.sol:58` + `IVerifiableFactory.sol:9`.) The factory internally calls `IUUPSProxy(proxy).getVerifiableProxyData` to read the salt (appended to the clone's runtime bytecode per [§2](/spec/#2-composite-of-standards)), reconstructs the expected CREATE2 address from `(UUPSProxy creation code, factory, outerSalt)`, and **only returns true if both** the address matches AND the proxy currently points at `expectedImplementation`.
+
+**Deployer caveat (load-bearing for address prediction).** The outer CREATE2 salt is computed as:
+
+```solidity
+bytes32 outerSalt = keccak256(abi.encode(msg.sender, salt));
+```
+
+(Source: `VerifiableFactory.sol:33`.) The outer salt mixes in the **deployer's address** (`msg.sender` at `deployProxy` time), not the name owner's address. As a result, **the proxy address depends on who actually broadcasts the deployment transaction.** If a name owner deploys their own AuthResolver, the proxy address is keyed to their EOA; if a third party (a deployment script, a UI's deployer, a relayer) deploys on their behalf, the address is keyed to that third party. Implementers that need deterministic per-owner addresses MUST either (a) require the name owner to deploy directly, (b) use a known canonical deployer address across all deployments, or (c) record the deployer in the proxy's init data and expose it via `getDeployedFor` so relying parties can re-derive the address.
+
+**Deployment event for indexers.** The factory emits:
+
+```solidity
+event ProxyDeployed(address indexed sender,
+ address indexed proxyAddress,
+ uint256 salt,
+ address implementation);
+```
+
+(Source: `IVerifiableFactory.sol:5`. Note: `salt` and `implementation` are NOT indexed.) Indexers tracking AuthResolver deployments SHOULD subscribe to this event filtered by `implementation == <AuthResolverImpl address>` to discover all per-name proxies on a chain.
+
+The implementation **MUST NOT** assume the existence of a centralized registry of MARP-deployed proxies. Each Wave-1 MARP deploys their own proxy; relying parties discover the proxy address via Universal Resolver V2's `findResolver(name)` (`UniversalResolverV2.sol`), not via an AuthResolver-specific directory.
+
+## 4.4 EIP-165 / `IERC7996` advertisement (NORMATIVE)
+
+A conformant AuthResolverImpl:
+
+- **MUST** advertise a feature id (4-byte selector) derived from `keccak256("auth-resolver-v1")` via `IERC7996.supportsFeature(bytes4 featureId)` (signature per ENSIP-22 / ERC-7996, ENS documentation at "ERC-7996"; the v2 PermissionedResolver inherits `IERC7996`). This is the single one-call detection signal v2-aware clients use to confirm AuthResolver capability.
+- **MUST** advertise the custom auth profile selectors (`verifyAction`, `getFreshSignedState` once spec'd in a subsequent revision) via the inherited `supportsInterface(bytes4)` override. The selectors are the only signal Universal Resolver V2 uses to know whether to route a profile call.
+- **MAY** advertise additional per-category feature ids in future revisions (e.g., `auth-resolver-credential-v1`) if v1.1 adds independent versioning per record category. Not required in v1.
+
+Universal Resolver V2's typed error vocabulary — `ResolverNotFound`, `ResolverNotContract`, `UnsupportedResolverProfile(bytes4 selector)`, `ResolverError`, `ReverseAddressMismatch`, `HttpError` — flows through to AuthResolver callers unchanged. The error definitions live in upstream `AbstractUniversalResolver` (the local `UniversalResolverV2.sol` inherits from it; the upstream is at `lib/ens-contracts/`). `UnsupportedResolverProfile(bytes4)` (selector `0x7b1c461b`) is also declared by `IPermissionedResolver.sol:32` and raised by PermissionedResolver's own `resolve` path (`PermissionedResolver.sol:535,547`) when an inner staticcall returns empty data. Clients distinguishing `UnsupportedResolverProfile(selector)` (resolver doesn't implement that record type) from `ResolverError` (resolver reverted) feed into the `DenyReason` mapping in [§5.1](/spec/verify-action#51-signature-return-type-denyreason-enum).
+
+## 4.5 Record profile and EAC role grants (NORMATIVE)
+
+A conformant AuthResolverImpl:
+
+- **MUST** store credential, capability, and revocation records under the inherited `IDataResolver.data(node, key) → bytes` profile (`PermissionedResolver.sol` Supported Record Types). It **MUST NOT** store these records as `text` records. Text records are reserved for human-readable metadata (e.g., `auth.credential.label[<id>]` = "Pinata signer for Émile"), not for credential bytes.
+- **MUST** use the key convention:
+ - `auth.credential[<id>]` — CBOR-encoded `CredentialRecord` ([§6.1](/spec/record-schemas#61-credentialrecord))
+ - `auth.capability[<id>]` — CBOR-encoded `CapabilityRecord` ([§6.2](/spec/record-schemas#62-capabilityrecord))
+ - `auth.revocation[<id>]` — CBOR-encoded `RevocationRecord` ([§6.3](/spec/record-schemas#63-revocationrecord)). Empty bytes (or absence) MUST be interpreted as "not revoked."
+- **MUST** gate writes via the inherited EAC `ROLE_SET_DATA = 1 << 36` (`PermissionedResolverLib.sol:52`). Read access is ungated.
+
+The `<id>` segment is a free string identifier chosen by the name owner. Conformant implementations MUST NOT impose a format constraint on `<id>` beyond the inherited PermissionedResolver key-length limits. Counterparties select among multiple published credentials by the credential record's validity window ([§6.1](/spec/record-schemas#61-credentialrecord)) and revocation status.
+
+### 4.5.1 Role-grant mechanic (NORMATIVE)
+
+The grant surface on PermissionedResolver wraps `EnhancedAccessControl` (`EnhancedAccessControl.sol`). EAC itself exposes exactly **two** grant entry points (per `IEnhancedAccessControl.sol:68-95`):
+
+```solidity
+function grantRoles(uint256 resource, uint256 roleBitmap, address account)
+ external returns (bool); // rejects ROOT_RESOURCE
+function grantRootRoles(uint256 roleBitmap, address account)
+ external returns (bool); // root only
+```
+
+`PermissionedResolver` provides **two convenience wrappers** that compute the resource for callers (the spec previously named a third, `authorizeRootRoles` — that does not exist; the root analog is EAC's `grantRootRoles` directly):
+
+```solidity
+// Name-scoped wrapper — grants ROLE on resource(node, 0); satisfies any per-key check on this node.
+function authorizeNameRoles(bytes32 node, uint256 roleBitmap, address account, bool grant) external;
+
+// Record-scoped wrapper — grants ROLE on resource(node, partHash(key)); tightest scope.
+function authorizeDataRoles(bytes32 node, bytes calldata key, address account, bool grant) external;
+```
+
+**Permission check is an OR-of-3-resources.** When a caller invokes `setData(node, key, value)`, PermissionedResolver's `onlyPartRoles` modifier (`PermissionedResolver.sol:183-193`) accepts if the caller holds the required role on **any one** of:
+
+1. `resource(node, partHash(key))` — record scope (this exact key under this name)
+2. `resource(0, partHash(key))` — cross-name key scope (this key under any name — narrow but useful for cross-name operators)
+3. `resource(node, 0)` — name scope (any key under this name — superset of record scope)
+
+A grant on `resource(0, 0)` (root) is held only by `grantRootRoles` and satisfies all checks. A grant via `authorizeNameRoles(node, ROLE_SET_DATA, op, true)` satisfies pattern (3) above and therefore covers all data keys under that name.
+
+**Direct EAC `grantRoles` / `revokeRoles` are DISABLED at the PermissionedResolver layer.** Both always revert (`PermissionedResolver.sol:714-733`). All role management MUST flow through the `authorize*Roles` wrappers above, or through the initial bootstrap (next).
+
+**Initial role grant happens at proxy initialization.** `PermissionedResolver.sol:236-242` exposes `initialize(address admin, uint256 roleBitmap)` which calls `_grantRoles(ROOT_RESOURCE, roleBitmap, admin, false)` and runs `__UUPSUpgradeable_init`. AuthResolverImpl deployments via `VerifiableFactory.deployProxy(impl, salt, initData)` pass an `initData` calldata blob that invokes this `initialize` with the owner address and the initial role bitmap (typically `ROLE_UPGRADE | ROLE_UPGRADE_ADMIN | ROLE_SET_DATA | ROLE_SET_DATA_ADMIN | ROLE_SET_ALIAS | ROLE_SET_ALIAS_ADMIN` on `ROOT_RESOURCE` for the deploying name owner).
+
+### 4.5.2 Admin-role layer (NORMATIVE)
+
+For every primary role, `PermissionedResolverLib.sol` defines a paired **admin role** at the upper-128-bit half of the role bitmap:
+
+| Primary role | Value | Admin role | Value | Required to grant primary |
+|---|---|---|---|---|
+| `ROLE_SET_DATA` | `1 << 36` | `ROLE_SET_DATA_ADMIN` | `ROLE_SET_DATA << 128` | yes |
+| `ROLE_SET_ALIAS` | `1 << 28` | `ROLE_SET_ALIAS_ADMIN` | `ROLE_SET_ALIAS << 128` | yes |
+| `ROLE_UPGRADE` | `1 << 124` | `ROLE_UPGRADE_ADMIN` | `ROLE_UPGRADE << 128` | yes |
+
+This is a **bit-packed admin pattern, not an OpenZeppelin-style `roleAdmin` mapping**. EAC's `_checkCanGrantRoles` (`EnhancedAccessControl.sol:370-379`) computes the caller's grantable roles by taking their bitmap, right-shifting 128 bits to project the admin-half onto the primary-half, then OR-ing — so an account holding `ROLE_SET_DATA_ADMIN` (and only `ROLE_SET_DATA_ADMIN`) **can grant `ROLE_SET_DATA`** to others on the same resource, even without holding `ROLE_SET_DATA` itself for that resource.
+
+**Operational implication.** To delegate write authority over a single credential key from the name owner to an operator EOA, the name owner — initialized with both `ROLE_SET_DATA` and `ROLE_SET_DATA_ADMIN` on `ROOT_RESOURCE` — calls:
+
+```solidity
+authResolver.authorizeDataRoles(node, "auth.credential[primary]", operatorEOA, true);
+```
+
+If the name owner was initialized with `ROLE_SET_DATA` only (no `_ADMIN`), they could publish records themselves but **could not delegate**. If initialized with `ROLE_SET_DATA_ADMIN` only (no primary), they could delegate but could not publish records themselves. Deployments SHOULD grant both on `ROOT_RESOURCE` at `initialize` time unless an explicit two-role-holder separation-of-duties is part of the operator model.
+
+### 4.5.3 Resource keying
+
+PermissionedResolver computes the EAC `resource` as `uint256(keccak256(node, part))` where `part = partHash(key)` (`PermissionedResolverLib.sol:66-92`). This makes records **namehash-stable** — they do not participate in the registry's mutable-token-id polymorphism that uses `anyId` for cross-token grants. The lifecycle implications of this are addressed in [§5.3](/spec/verify-action#53-caveats-and-lifecycle-rules-normative-for-relying-parties).
+
+CBOR field layouts for each record type are abstract in [§6](/spec/record-schemas) and will be specified at the byte level in a later v1.0-draft revision.
+
+## 4.6 HCA attribution (NORMATIVE)
+
+A conformant AuthResolverImpl inherits `HCAContextUpgradeable` from PermissionedResolver, which rewrites `_msgSender` to return the controlling owner address when the caller is a registered Hidden Contract Account proxy. Exact rewrite mechanic (`HCAEquivalence.sol:37-42`):
+
+```solidity
+function _msgSenderWithHcaEquivalence internal view returns (address) {
+ if (address(HCA_FACTORY) == address(0)) return msg.sender;
+ address accountOwner = HCA_FACTORY.getAccountOwner(msg.sender);
+ if (accountOwner == address(0)) return msg.sender;
+ return accountOwner;
+}
+```
+
+The HCAFactory is supplied at construction time as an `IHCAFactoryBasic`-typed `immutable` (`HCAEquivalence.sol:28-30`), passed through PermissionedResolver's constructor at `PermissionedResolver.sol:201`. `IHCAFactoryBasic` is a single-method interface (selector `0x442b172c` per `IHCAFactoryBasic.sol`):
+
+```solidity
+function getAccountOwner(address hca) external view returns (address);
+```
+
+**Operational requirement**:
+
+- For MARPs using smart-account wallets (Safe, ERC-4337, ZeroDev/Kernel), `ROLE_SET_DATA` (or any other role) **MUST** be granted to the **controlling EOA**, not the smart-account proxy. The EAC role check runs against `_msgSender`, which the HCA layer rewrites — and EAC inherits `HCAContext` directly (`EnhancedAccessControl.sol:51`), so all four EAC permission modifiers (`canGrantRoles`, `canRevokeRoles`, `onlyRoles`, `onlyRootRoles`) are HCA-rewrite-aware.
+- For MARPs using EOAs directly, HCA is a no-op. `_msgSender == msg.sender`. Standard EAC role grants work without HCA-specific handling.
+- For MARPs whose smart account is **not** registered with any HCAFactory, the AuthResolverImpl proxy MAY be deployed with `address(0)` as the HCA factory constructor parameter, which short-circuits the rewrite path (`address(0)` factory → `return msg.sender;` immediately). In that mode, smart-account-backed MARPs MUST grant roles to the proxy address directly.
+
+**Rhinestone framing — operational, not source-level.** `IHCAFactoryBasic` is intentionally factory-agnostic; no Rhinestone-specific contract address or factory name appears in the v2 source. The "production HCAFactory" is Rhinestone's deployment as an operational choice across Wave-1 MARPs, not a contract-level constraint. Default for v1 is to ship with HCA enabled pointing at Rhinestone's factory; alternative factories are permitted at AuthResolverImpl construction time and require no source change.
+
+## 4.7 Upgrade authority (NORMATIVE)
+
+A conformant AuthResolverImpl:
+
+- **MUST** use UUPS upgrade plumbing inherited from PermissionedResolver via OpenZeppelin's `UUPSUpgradeable`.
+- **MUST** gate `_authorizeUpgrade` on the holder of `ROLE_UPGRADE = 1 << 124` on the proxy's `ROOT_RESOURCE` (`PermissionedResolverLib.sol:57`; enforcement at `PermissionedResolver.sol:740-744` via `onlyRootRoles(ROLE_UPGRADE)`).
+- **MUST** grant `ROLE_UPGRADE` (and typically `ROLE_UPGRADE_ADMIN`, per §4.5.2) to the deploying name owner at proxy initialization via `initialize(admin, roleBitmap)` (§4.5.1). The deploying name owner controls all upgrades to their AuthResolver proxy.
+- **MUST NOT** assume or require a central multisig, ENS DAO timelock, or other off-proxy upgrade authority. Each MARP's proxy is independently upgradeable by its owner; a bug or compromise in one proxy does not propagate.
+
+**`canUpgradeFrom` is permissive by design.** `PermissionedResolver.sol:628-632` — `canUpgradeFrom(address)` unconditionally returns `true`. UUPS upgrade authorization is therefore enforced solely by the **current** implementation's `_authorizeUpgrade`, not by any source-implementation whitelist. An upgrade from `AuthResolverImpl v1` to a successor `AuthResolverImpl v2` requires only that the upgrader holds `ROLE_UPGRADE` on the proxy at the moment `upgradeToAndCall` is invoked — there is no cross-impl gatekeeping or registry of approved upgrade targets.
+
+The Verifier is the only centralized governance surface in the v1 system ([§3.1](/spec/verifier#31-purpose-and-invariants) — single shared deployment, immutable scheme dispatch). An optional implementation-version registry — letting Wave-1 MARPs verify the proxy points at an audited implementation — is a possible companion artifact; it is **not** a deliverable of this revision.
+
+## 4.8 Conformance criteria (NORMATIVE)
+
+A conformant AuthResolverImpl satisfies every MUST/MUST NOT and SHOULD/MAY in this table. This restates the normative content in §4.2–§4.7; the source sections remain authoritative for any discrepancy.
+
+| # | Requirement | Type | Source |
+|---|---|---|---|
+| A1 | Extend `PermissionedResolver` directly (17-base inheritance chain inherited) | MUST | §4.2 |
+| A2 | NOT re-implement primitives already present on PermissionedResolver | MUST NOT | §4.2 |
+| A3 | Add only: (a) custom auth profile methods ([§5](/spec/verify-action)), (b) EIP-165 feature id advertisement (§4.4), (c) optional `getDeployedFor` view (§4.3) | MUST | §4.2 |
+| A4 | NOT override or disable inherited `setAlias` | MUST NOT | §4.2 |
+| A5 | Deploy `AuthResolverImpl` once per chain as the shared implementation | MUST | §4.3 |
+| A6 | Deploy each per-name AuthResolver as a UUPS proxy via `VerifiableFactory.deployProxy(address implementation, uint256 salt, bytes data)` | MUST | §4.3 |
+| A7 | Pass salt = `uint256(keccak256(abi.encode("AuthResolverV1", ownerAddress, versionId)))` | MUST | §4.3 |
+| A8 | Use `verifyContract(proxy, expectedImplementation)` (two args) for provenance verification | MUST (when verifying provenance) | §4.3 |
+| A9 | Expose `getDeployedFor returns (address owner, uint256 versionId, address verifier)` | SHOULD | §4.3 |
+| A10 | NOT assume the existence of a centralized registry of MARP-deployed proxies | MUST NOT | §4.3 |
+| A11 | Advertise a 4-byte feature id derived from `keccak256("auth-resolver-v1")` via `IERC7996.supportsFeature(bytes4 featureId)` | MUST | §4.4 |
+| A12 | Advertise custom auth profile selectors (`verifyAction`, `getFreshSignedState`) via inherited `supportsInterface(bytes4)` | MUST | §4.4 |
+| A13 | Advertise per-category feature ids (e.g., `auth-resolver-credential-v1`) | MAY (deferred to v1.1) | §4.4 |
+| A14 | Store credential/capability/revocation records under `IDataResolver.data(node, key) → bytes` profile | MUST | §4.5 |
+| A15 | NOT store these records as `text` records | MUST NOT | §4.5 |
+| A16 | Use key convention `auth.credential[<id>]` / `auth.capability[<id>]` / `auth.revocation[<id>]`, CBOR-encoded | MUST | §4.5 |
+| A17 | Interpret empty bytes or absence at `auth.revocation[<id>]` as "not revoked" | MUST | §4.5 |
+| A18 | Gate writes via inherited EAC `ROLE_SET_DATA = 1 << 36`; reads ungated | MUST | §4.5 |
+| A19 | Grant the deploying name owner BOTH `ROLE_X` and `ROLE_X_ADMIN` at `initialize` time for any role they need to both publish and delegate | SHOULD | §4.5.2 |
+| A20 | NOT impose format constraints on `<id>` beyond inherited PermissionedResolver key-length limits | MUST NOT | §4.5 |
+| A21 | For smart-account-backed MARPs under HCA: grant `ROLE_SET_DATA` to the **controlling EOA**, not the smart-account proxy address | MUST | §4.6 |
+| A22 | Deploy with `address(0)` as the HCA factory parameter to disable HCA | MAY | §4.6 |
+| A23 | Use UUPS upgrade plumbing inherited via OpenZeppelin's `UUPSUpgradeable` | MUST | §4.7 |
+| A24 | Gate `_authorizeUpgrade` on holder of `ROLE_UPGRADE = 1 << 124` on the proxy's `ROOT_RESOURCE` | MUST | §4.7 |
+| A25 | Grant `ROLE_UPGRADE` (typically with `ROLE_UPGRADE_ADMIN`) to the deploying name owner at proxy initialization | MUST | §4.7 |
+| A26 | NOT assume or require a central multisig, ENS DAO timelock, or other off-proxy upgrade authority | MUST NOT | §4.7 |

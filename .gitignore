@@ -1,0 +1,8 @@
+node_modules/
+docs/dist/
+docs/.vocs/
+.vocs/
+.vite/
+.DS_Store
+.env
+*.log

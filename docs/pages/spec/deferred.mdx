@@ -1,0 +1,22 @@
+---
+title: "Deferred Items"
+description: "Work scoped out of v1.0-draft.02 and targeted at later revisions."
+---
+
+# 9. Deferred beyond v1.0-draft.02
+
+| Item | Target revision |
+|---|---|
+| Signed-freshness EIP-712 layout + gateway response framing (incl. ENSIP-22 recursive CCIP-Read + CORS conformance per [§6.4](/spec/record-schemas#64-deferred-getfreshsignedstate)) | Later v1.0-draft revision |
+| CBOR field-level layouts for CredentialRecord, CapabilityRecord, RevocationRecord | Later v1.0-draft revision |
+| Threat model expansion (replay, key compromise, gateway trust, governance capture) | Later v1.0-draft revision |
+| Re-verification of normative claims against finalized ENSv2 mainnet docs once published | Carry-forward; ongoing |
+| Initial test vectors (per-scheme verify + per-record encode/decode + factory address-prediction + HCA rewrite + `verifyAction` orchestration) | M1 deliverable with reference implementation (vectors land in `<impl-repo>/tests/vectors/`) |
+| Reference implementation pointer (concrete impl-repo address + commit range) | v1.0-final (placeholder in [§6.5](/spec/record-schemas#65-reference-implementation-pointer-org-confirmed-repo--impl-pending)) |
+| ENSIP-10 wildcard resolver path | v1.1 |
+| Resolver-level aliasing semantics for multi-name MARPs | v1.1 |
+| Capability scope structured-enumeration | v1.1 |
+| ENSIP-25 binding enforcement (optional `verifyAction` precondition) | v1.1 if NCCoE position-paper review drives a re-decision |
+| Cross-chain credential discovery via EIP-8121 | v2 cycle |
+| Batched `verifyMany` entry point on the Verifier | v1.1 if pilots request |
+| AuthResolverImpl version registry artifact | optional companion artifact |

@@ -1,0 +1,42 @@
+---
+title: "End-to-End Verification Flow"
+description: "Sequence diagram of relying party → Universal Resolver → AuthResolver → Verifier."
+---
+
+# 7. End-to-End Verification Flow
+
+```mermaid
+sequenceDiagram
+ autonumber
+ participant RP as Relying Party
+ participant UR as Universal Resolver V2
+ participant AR as AuthResolverImpl<br/>(per-name UUPS proxy)
+ participant V as Verifier
+ participant P as EIP-7951 / ecrecover / EIP-1271
+
+ Note over RP: Receives signed action from agent:<br/>{node, credentialId, message, signature}
+
+ RP->>UR: findResolver(dnsEncode(name))
+ UR-->>RP: AuthResolver proxy address
+
+ RP->>AR: verifyAction(node, credentialId, message, signature)
+
+ AR->>AR: data(node, "auth.credential[id]") → CBOR bytes
+ AR->>AR: CBOR-decode → CredentialRecord
+ AR->>AR: check notBefore ≤ block.timestamp ≤ notAfter
+ AR->>AR: data(node, "auth.revocation[id]") → check empty
+
+ AR->>V: isSchemeSupported(schemeId)
+ V-->>AR: true
+
+ AR->>V: verify(schemeId, message, signature, pubKey)
+ V->>P: dispatch by schemeId<br/>(P-256 precompile | ecrecover | staticcall)
+ P-->>V: valid bool
+ V-->>AR: valid bool
+
+ AR-->>RP: VerificationResult{allowed, reason, resolvedAt, stateHash}
+
+ Note over RP: Enforce allow/deny on reason
+```
+
+The flow generalizes across all three v1 schemes. The dispatch step (P) varies by `schemeId` on the resolved credential; the rest of the orchestration is identical. The Verifier is a single shared contract; the AuthResolver is per-name.
