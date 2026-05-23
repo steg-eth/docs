@@ -12,6 +12,7 @@ export default defineConfig({
     dark: '/steg-white.svg?v=2',   // white mark on dark bg
   },
   iconUrl: '/steg.svg?v=2',
+  ogImageUrl: '/og.png',           // 1200x630 Steg social preview
   socials: [{ icon: 'github', link: 'https://github.com/steg-eth' }],
 
   // Match the landing page (eureka.etcetera): IBM Plex Sans + warm light bg.
