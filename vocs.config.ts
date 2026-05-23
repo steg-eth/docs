@@ -7,7 +7,10 @@ export default defineConfig({
     'Applied research and operations in proof verification, modular verifier design, and Ethereum-anchored trust models',
   baseUrl: 'https://docs.steg.eth.link',
   rootDir: 'docs',
-  logoUrl: '/steg.svg?v=2',
+  logoUrl: {
+    light: '/steg.svg?v=2',        // black mark on light/cream bg
+    dark: '/steg-white.svg?v=2',   // white mark on dark bg
+  },
   iconUrl: '/steg.svg?v=2',
   socials: [{ icon: 'github', link: 'https://github.com/steg-eth' }],
 
